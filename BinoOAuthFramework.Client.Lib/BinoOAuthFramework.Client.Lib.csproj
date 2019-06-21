@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="12.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Binodata.Crypto.Lib\Binodata.Crypto.Lib\Binodata.Crypto.Lib.csproj" />
+    <ProjectReference Include="..\..\Binodata.Utility.Component.Standard\Binodata.Utility.Component.Standard\Binodata.Utility.Component.Standard.csproj" />
+  </ItemGroup>
+
+</Project>
