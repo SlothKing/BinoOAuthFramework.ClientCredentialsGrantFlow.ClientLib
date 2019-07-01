@@ -12,6 +12,7 @@ using Binodata.Utility.Component.Standard.AdapterModel;
 using BinoOAuthFramework.Client.Lib.Error;
 using Jose;
 using System.Text;
+using System.Collections.Generic;
 
 namespace BinoOAuthFramework.Client.Lib
 {
@@ -153,7 +154,7 @@ namespace BinoOAuthFramework.Client.Lib
         }
 
 
-        public AuthorizeValueModel Authorize(string authZUrl, AuthorizeValueModel authorizeModel)
+        public AuthorizeValueModel Authorize(string authZUrl, AuthorizeValueModel authorizeModel, AuthZReqModel reqAuthZValue)
         {
             //Hash(r)^(n-i)
             int minusValue = authorizeModel.AuthZTimes - authorizeModel.CurrentTimes;
@@ -190,15 +191,53 @@ namespace BinoOAuthFramework.Client.Lib
             //取得Token
             string token = JWTHasher.GetJWTValue(clientReqAuthZStr, authorizeModel.ClientProtectedCryptoModel.Key);
 
+            //向資源保護者請求授權 undo
+            string reqAuthZValueStr = JsonConvert.SerializeObject(reqAuthZValue);
 
-            //向資源保護者請求授權
-            // reqAuthZValue 來源怪怪的 不懂那邊來源 跟帶入參數的關係
-            //string reqAuthZValueStr = JsonConvert.SerializeObject(reqAuthZValue);
-            // reqAuthZValue Model 裡面有 token 跟上述算出來的 token 又是甚麼關係 怕有誤解所以這段有點卡住
-            //string cypherTextPrimeStr = ReqProtectedServerAuthZ(authZUrl, reqAuthZValueStr, token);
+            Dictionary<string, string> headers = new Dictionary<string, string>
+            {
+                {"ClientId",clientResource.ClientId },
+                {"Token",token}
+            };
+            ApiResult<string> rescrAuthorizeRespOpt = AuthenHttpHandler.SendRequest<string>(authZUrl, reqAuthZValueStr, headers);
+            if(rescrAuthorizeRespOpt.ResultCode != 0)
+            {
+                //undo
+                throw new Exception();
+            }
+            
+            string cypherTextPrimeStr = rescrAuthorizeRespOpt.CypherCheckValue;
+            //CheckProtectedServerRespAuthZValue
+            string decryptStr = aesCrypter.Decrypt(cypherTextPrimeStr);
+            TimesCypherTextPrimeModel timesCypherTextPrimeModel = JsonConvert.DeserializeObject<TimesCypherTextPrimeModel>(decryptStr);
 
-            //temp for compile
-            return new AuthorizeValueModel();
+            bool checkAuthZValueResult = CheckProtectedServerRespAuthZValue(timesCypherTextPrimeModel);
+            if(checkAuthZValueResult == false)
+            {
+                //undo
+                throw new Exception();
+            }
+            authorizeModel.CurrentTimes = authorizeModel.CurrentTimes + 1;
+            authorizeModel.ClientTempId.HashValue = hashNMinusI;
+
+            return authorizeModel;
+        }
+
+        /// <summary>
+        /// 檢核 資源保護者回傳值
+        /// </summary>
+        /// <param name="timesCypherTextPrimeModel"></param>
+        /// <returns></returns>
+        private bool CheckProtectedServerRespAuthZValue(TimesCypherTextPrimeModel timesCypherTextPrimeModel)
+        {
+            bool result = false;
+            string hashNMinusIAddOne = timesCypherTextPrimeModel.ClientTempId.HashValue;
+            string hashNMinusI = timesCypherTextPrimeModel.ClientTempIdPrime.HashValue;
+            if (MD5Hasher.Hash(hashNMinusI) == hashNMinusIAddOne)
+            {
+                result = true;
+            }
+            return result;
         }
 
         private string GetResrcClientKeyAuthzTimesValue(string crypto, ClientTempIdentityModel clientTempIdModel, int currentTimes)
