@@ -10,7 +10,7 @@ namespace BinoOAuthFramework.Client.Lib.Http
 {
     internal class AuthenHttpHandler
     {
-        private static async Task<string> SendRequestBase(string url,string postData, Dictionary<string, string> headerDic)
+        private static async Task<string> SendRequestBaseByPost(string url,string postData, Dictionary<string, string> headerDic)
         {
             using (HttpClient client = new HttpClient())
             {
@@ -32,25 +32,56 @@ namespace BinoOAuthFramework.Client.Lib.Http
             }
         }
 
+        private static async Task<string> SendRequestBaseByGet(string url, Dictionary<string, string> headerDic)
+        {
+            using (HttpClient client = new HttpClient())
+            {
+                foreach (var header in headerDic)
+                {
+                    client.DefaultRequestHeaders.Add(header.Key, header.Value);
+                }
+                // 發出 post 並取得結果
+                HttpResponseMessage response = client.GetAsync(url).GetAwaiter().GetResult();
+                using (HttpContent content = response.Content)
+                {
+                    response.EnsureSuccessStatusCode();
+                    byte[] httpByte = await content.ReadAsByteArrayAsync().ConfigureAwait(false);
+                    string result = Encoding.UTF8.GetString(httpByte);
+                    return result;
+                }
+            }
+        }
+
         /// <summary>
         /// 以POST方法發出請求
         /// </summary>
         /// <param name="clientTempEncrypt"></param>
-        public static ApiResult<T> SendRequest<T>(string url, string requestString)
+        public static ApiResult<T> SendRequestByPost<T>(string url, string requestString)
         {
-            var result = SendRequestBase(url,requestString,new Dictionary<string, string>());
+            var result = SendRequestBaseByPost(url,requestString,new Dictionary<string, string>());
 
             return JsonConvert.DeserializeObject<ApiResult<T>>(result.Result);
         }
 
 
         /// <summary>
+        /// 以Get方法發出請求
+        /// </summary>
+        /// <param name="clientTempEncrypt"></param>
+        public static ApiResult<T> SendRequestByGet<T>(string url, Dictionary<string, string> headerDic)
+        {
+            var result = SendRequestBaseByGet(url, headerDic);
+
+            return JsonConvert.DeserializeObject<ApiResult<T>>(result.Result);
+        }
+
+        /// <summary>
         /// 以POST方法發出請求
         /// </summary>
         /// <param name="clientTempEncrypt"></param>
-        public static ApiResult<T> SendRequest<T>(string url, string requestString, Dictionary<string, string> headerDic)
+        public static ApiResult<T> SendRequestByPost<T>(string url, string requestString, Dictionary<string, string> headerDic)
         {
-            var result = SendRequestBase(url, requestString, headerDic);
+            var result = SendRequestBaseByPost(url, requestString, headerDic);
 
             return JsonConvert.DeserializeObject<ApiResult<T>>(result.Result);
         }

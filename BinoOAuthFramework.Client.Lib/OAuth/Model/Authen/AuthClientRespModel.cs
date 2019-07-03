@@ -4,7 +4,7 @@ using System.Text;
 
 namespace BinoOAuthFramework.Client.Lib.OAuth.Model.Authen
 {
-    internal class AuthClientRespModel
+    public class AuthClientRespModel
     {
         /// <summary>
         /// 客戶端ID

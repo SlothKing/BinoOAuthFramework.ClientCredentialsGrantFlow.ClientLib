@@ -13,6 +13,7 @@ using BinoOAuthFramework.Client.Lib.Error;
 using Jose;
 using System.Text;
 using System.Collections.Generic;
+using BinoOAuthFramework.Client.Lib.Http.Enum;
 
 namespace BinoOAuthFramework.Client.Lib
 {
@@ -24,15 +25,19 @@ namespace BinoOAuthFramework.Client.Lib
         private readonly string authServerAuthenApiUrl;
         private readonly string protectedAuthenApiUrl;
 
-        public Register()
+        public Register(ClientResource clientResource, RegisterInitialModel registerInitialModel, IAESCrypter aesCrypter)
         {
-
+            this.aesCrypter = aesCrypter;
+            this.clientResource = clientResource;
+            this.addMinuteExpiredTime = registerInitialModel.AddMinuteExpiredTime;
+            this.authServerAuthenApiUrl = registerInitialModel.AuthServerAuthenApiUrl;
+            this.protectedAuthenApiUrl = registerInitialModel.ProtectedAuthenApiUrl;
         }
 
         /// <summary>
         /// 用Client Key 、IV、Protected Server(s)相關資料 去AuthServer驗證 且取回對應的Token
         /// </summary>
-        public void Authenticate()
+        public ApiResult<AuthClientRespModel> Authenticate()
         {
             long expiredTime = GetExpiredUtc0UnixTime();
 
@@ -75,8 +80,17 @@ namespace BinoOAuthFramework.Client.Lib
                 CypherText = encryptCypherText,
             };
             string reqStr = JsonConvert.SerializeObject(authClientReqModel);
-            ApiResult<AuthClientRespModel> respones = AuthenHttpHandler.SendRequest<AuthClientRespModel>(authServerAuthenApiUrl, reqStr);
-            
+            ApiResult<AuthClientRespModel> respones = AuthenHttpHandler.SendRequestByPost<AuthClientRespModel>(authServerAuthenApiUrl, reqStr);
+            return respones;
+        }
+
+        public AuthClientCypherTextModel DecryptAuthServerResp(string cypherText)
+        {
+            aesCrypter.SetKey(clientResource.ClientKey);
+            aesCrypter.SetIV(clientResource.ClientIV);
+            string decryptResult = aesCrypter.Decrypt(cypherText);
+            AuthClientCypherTextModel authClientCypherTextModel = JsonConvert.DeserializeObject<AuthClientCypherTextModel>(decryptResult);
+            return authClientCypherTextModel;
         }
 
         /// <summary>
@@ -85,12 +99,8 @@ namespace BinoOAuthFramework.Client.Lib
         /// <param name="cypherText"></param>
         /// <param name="protectedId"></param>
         /// <returns></returns>
-        public AuthorizeValueModel CheckAuthServerResp(string cypherText, string protectedId)
+        public AuthorizeValueModel SendCypherTextToProtectedResourceForVerify(AuthClientCypherTextModel authClientCypherTextModel, string protectedId)
         {
-            aesCrypter.SetKey(clientResource.ClientKey);
-            aesCrypter.SetIV(clientResource.ClientIV);
-            string decryptResult = aesCrypter.Decrypt(cypherText);
-            AuthClientCypherTextModel authClientCypherTextModel = JsonConvert.DeserializeObject<AuthClientCypherTextModel>(decryptResult);
             //check
             if (authClientCypherTextModel.ClientId != clientResource.ClientId)
             {
@@ -128,12 +138,11 @@ namespace BinoOAuthFramework.Client.Lib
                 ClientTempId = authClientCypherTextModel.ClientTempId
             };
             string reqStr = JsonConvert.SerializeObject(reqModel);
-            string resrcCheckClientReqUrl = string.Format("{0}{1}", protectedAuthenApiUrl, "CheckClientRequest");
-            ApiResult<bool> resrcResp = AuthenHttpHandler.SendRequest<bool>(resrcCheckClientReqUrl, reqStr);
+            ApiResult<bool> resrcResp = AuthenHttpHandler.SendRequestByPost<bool>(protectedAuthenApiUrl, reqStr);
             //Protected Server 驗證結果
             if (!resrcResp.Value)
             {
-                throw new Exception();
+                throw new ProtectedServerAuthorizeException("The cypherText is not valid. Protected Server authorize fail.");
             }
             else
             {
@@ -149,35 +158,100 @@ namespace BinoOAuthFramework.Client.Lib
                 };
                 return authorizeModel;
             }
-
-
         }
 
 
-        public AuthorizeValueModel Authorize(string authZUrl, AuthorizeValueModel authorizeModel, AuthZReqModel reqAuthZValue)
+        public AuthorizeValueModel SendRequestAndAuthorizeByPost<TClass>(string protectedServerUrl, AuthorizeValueModel authorizeModel, TClass sendData)
         {
             //Hash(r)^(n-i)
             int minusValue = authorizeModel.AuthZTimes - authorizeModel.CurrentTimes;
-            string hashNMinusI =  HashMultipleTimes(authorizeModel.RandomValue, minusValue);
+            string hashNMinusI = HashMultipleTimes(authorizeModel.RandomValue, minusValue);
 
             //初始化請求授權
             string hashNMinusIAddOne = MD5Hasher.Hash(hashNMinusI);
 
             string authZKey = GetResrcClientKeyAuthzTimesValue(authorizeModel.ClientProtectedCryptoModel.Key, authorizeModel.ClientTempId, authorizeModel.CurrentTimes);
             string authZIv = GetResrcClientKeyAuthzTimesValue(authorizeModel.ClientProtectedCryptoModel.IV, authorizeModel.ClientTempId, authorizeModel.CurrentTimes);
-            
-            AuthorizeCypherTextModel cypherTextModel = new AuthorizeCypherTextModel
+
+            string currentTimesCypherText = GetCurrentTimesCypherText(authorizeModel, hashNMinusI, authZKey, authZIv);
+
+            string token = GetTokenByAuthorizeDataAndCurrentTimesCypherText(authorizeModel, currentTimesCypherText);
+
+            Dictionary<string, string> headers = new Dictionary<string, string>
             {
-                ClientTempId = authorizeModel.ClientTempId,
-                ExpiredTime = UnixTimeGenerator.GetExpiredUtc0UnixTime(addMinuteExpiredTime),
-                HashValue = hashNMinusI,
-                ProtectedId = authorizeModel.ProtectedId
+                {"ClientId",clientResource.ClientId },
+                {"Token",token}
             };
-            string authorizeCypherTextStr = JsonConvert.SerializeObject(cypherTextModel);
+            // 向資源保護者請求授權
+            string reqAuthZValueStr = JsonConvert.SerializeObject(sendData);
+            ApiResult<string> rescrAuthorizeRespOpt = AuthenHttpHandler.SendRequestByPost<string>(protectedServerUrl, reqAuthZValueStr, headers);
+            
+            TimesCypherTextPrimeModel timesCypherTextPrimeModel = DecryptProtectedServerResult(authZKey, authZIv, rescrAuthorizeRespOpt);
+
+            bool checkAuthZValueResult = CheckProtectedServerRespAuthZValue(timesCypherTextPrimeModel);
+            if (checkAuthZValueResult == false)
+            {
+                throw new Exception("CheckProtectedServerRespAuthZValue is fail.");
+            }
+            authorizeModel.CurrentTimes = authorizeModel.CurrentTimes + 1;
+            authorizeModel.ClientTempId.HashValue = hashNMinusI;
+
+            return authorizeModel;
+        }
+
+        public AuthorizeValueModel SendRequestAndAuthorizeByGet(string protectedServerUrl, AuthorizeValueModel authorizeModel)
+        {
+            //Hash(r)^(n-i)
+            int minusValue = authorizeModel.AuthZTimes - authorizeModel.CurrentTimes;
+            string hashNMinusI = HashMultipleTimes(authorizeModel.RandomValue, minusValue);
+
+            //初始化請求授權
+            string hashNMinusIAddOne = MD5Hasher.Hash(hashNMinusI);
+
+            string authZKey = GetResrcClientKeyAuthzTimesValue(authorizeModel.ClientProtectedCryptoModel.Key, authorizeModel.ClientTempId, authorizeModel.CurrentTimes);
+            string authZIv = GetResrcClientKeyAuthzTimesValue(authorizeModel.ClientProtectedCryptoModel.IV, authorizeModel.ClientTempId, authorizeModel.CurrentTimes);
+
+            string currentTimesCypherText = GetCurrentTimesCypherText(authorizeModel, hashNMinusI, authZKey, authZIv);
+
+            string token = GetTokenByAuthorizeDataAndCurrentTimesCypherText(authorizeModel, currentTimesCypherText);
+
+            Dictionary<string, string> headers = new Dictionary<string, string>
+            {
+                {"ClientId",clientResource.ClientId },
+                {"Token",token}
+            };
+            // 向資源保護者請求授權
+            ApiResult<string> rescrAuthorizeRespOpt = AuthenHttpHandler.SendRequestByGet<string>(protectedServerUrl, headers);
+
+            TimesCypherTextPrimeModel timesCypherTextPrimeModel = DecryptProtectedServerResult(authZKey, authZIv, rescrAuthorizeRespOpt);
+
+            bool checkAuthZValueResult = CheckProtectedServerRespAuthZValue(timesCypherTextPrimeModel);
+            if (checkAuthZValueResult == false)
+            {
+                throw new Exception("CheckProtectedServerRespAuthZValue is fail.");
+            }
+            authorizeModel.CurrentTimes = authorizeModel.CurrentTimes + 1;
+            authorizeModel.ClientTempId.HashValue = hashNMinusI;
+
+            return authorizeModel;
+        }
+
+        private TimesCypherTextPrimeModel DecryptProtectedServerResult(string authZKey, string authZIv, ApiResult<string> rescrAuthorizeRespOpt)
+        {
+            if (rescrAuthorizeRespOpt.ResultCode != 0)
+            {
+                throw new Exception(rescrAuthorizeRespOpt.ResultMessage);
+            }
+            string cypherTextPrimeStr = rescrAuthorizeRespOpt.CypherCheckValue;
             aesCrypter.SetKey(authZKey);
             aesCrypter.SetIV(authZIv.Substring(0, 16));
-            string currentTimesCypherText = aesCrypter.Encrypt(authorizeCypherTextStr);
+            string decryptStr = aesCrypter.Decrypt(cypherTextPrimeStr);
+            TimesCypherTextPrimeModel timesCypherTextPrimeModel = JsonConvert.DeserializeObject<TimesCypherTextPrimeModel>(decryptStr);
+            return timesCypherTextPrimeModel;
+        }
 
+        private static string GetTokenByAuthorizeDataAndCurrentTimesCypherText(AuthorizeValueModel authorizeModel, string currentTimesCypherText)
+        {
             ClientReqAuthZModel clientReqAuthZModel = new ClientReqAuthZModel
             {
                 ClientTempId = authorizeModel.ClientTempId,
@@ -190,37 +264,23 @@ namespace BinoOAuthFramework.Client.Lib
 
             //取得Token
             string token = JWTHasher.GetJWTValue(clientReqAuthZStr, authorizeModel.ClientProtectedCryptoModel.Key);
+            return token;
+        }
 
-            //向資源保護者請求授權 undo
-            string reqAuthZValueStr = JsonConvert.SerializeObject(reqAuthZValue);
-
-            Dictionary<string, string> headers = new Dictionary<string, string>
+        private string GetCurrentTimesCypherText(AuthorizeValueModel authorizeModel, string hashNMinusI, string authZKey, string authZIv)
+        {
+            AuthorizeCypherTextModel cypherTextModel = new AuthorizeCypherTextModel
             {
-                {"ClientId",clientResource.ClientId },
-                {"Token",token}
+                ClientTempId = authorizeModel.ClientTempId,
+                ExpiredTime = UnixTimeGenerator.GetExpiredUtc0UnixTime(addMinuteExpiredTime),
+                HashValue = hashNMinusI,
+                ProtectedId = authorizeModel.ProtectedId
             };
-            ApiResult<string> rescrAuthorizeRespOpt = AuthenHttpHandler.SendRequest<string>(authZUrl, reqAuthZValueStr, headers);
-            if(rescrAuthorizeRespOpt.ResultCode != 0)
-            {
-                //undo
-                throw new Exception();
-            }
-            
-            string cypherTextPrimeStr = rescrAuthorizeRespOpt.CypherCheckValue;
-            //CheckProtectedServerRespAuthZValue
-            string decryptStr = aesCrypter.Decrypt(cypherTextPrimeStr);
-            TimesCypherTextPrimeModel timesCypherTextPrimeModel = JsonConvert.DeserializeObject<TimesCypherTextPrimeModel>(decryptStr);
-
-            bool checkAuthZValueResult = CheckProtectedServerRespAuthZValue(timesCypherTextPrimeModel);
-            if(checkAuthZValueResult == false)
-            {
-                //undo
-                throw new Exception();
-            }
-            authorizeModel.CurrentTimes = authorizeModel.CurrentTimes + 1;
-            authorizeModel.ClientTempId.HashValue = hashNMinusI;
-
-            return authorizeModel;
+            string authorizeCypherTextStr = JsonConvert.SerializeObject(cypherTextModel);
+            aesCrypter.SetKey(authZKey);
+            aesCrypter.SetIV(authZIv.Substring(0, 16));
+            string currentTimesCypherText = aesCrypter.Encrypt(authorizeCypherTextStr);
+            return currentTimesCypherText;
         }
 
         /// <summary>
